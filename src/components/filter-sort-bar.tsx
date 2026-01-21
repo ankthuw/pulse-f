@@ -3,7 +3,7 @@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { SlidersHorizontal, Filter, X, ChevronDown, Flame, Activity, Eye, Clock, Newspaper, TrendingUp, Zap, ArrowUpRight } from 'lucide-react'
+import { SlidersHorizontal, Filter, X, ChevronDown, Flame, Activity, Eye, Clock, Newspaper, TrendingUp, Zap, ArrowUpRight, ArrowUpDown, TrendingDown } from 'lucide-react'
 import { useMemo } from 'react'
 import { getImpactBadge } from '@/lib/news-utils'
 import { NewsArticle } from '@/types/news'
@@ -12,7 +12,7 @@ type ApiSortOption = 'relevance' | 'date-desc' | 'date-asc' | 'volume-desc' | 'v
 type ClientSortOption = 'none' | 'source-asc' | 'source-desc' | 'impact-asc' | 'impact-desc'
 type ImpactLevel = 'all' | 'critical' | 'high' | 'medium' | 'low'
 type TrendingLevel = 'all' | 'viral' | 'hot' | 'trending' | 'rising'
-type TimeRange = 'all' | 'today' | '24h' | 'week' | 'month'
+type TimeRange = 'all' | '24h' | 'week' | 'month'
 
 interface FilterState {
   impactLevel: ImpactLevel
@@ -54,8 +54,8 @@ const STRINGS = {
     none: 'None',
     sourceAZ: 'Source (A-Z)',
     sourceZA: 'Source (Z-A)',
-    impactHighLow: 'Impact (High→Low)',
-    impactLowHigh: 'Impact (Low→High)',
+    impactHighLow: 'Impact (High - Low)',
+    impactLowHigh: 'Impact (Low - High)',
     gdeltRelevance: 'GDELT relevance score',
     byVolume: 'By GDELT volume',
     newestFirst: 'Newest articles first',
@@ -66,19 +66,18 @@ const STRINGS = {
     showing: 'Showing',
     of: 'of',
     articles: 'articles',
-    allLevels: 'All Levels',
-    criticalOnly: 'Critical Only',
-    highCritical: 'High & Critical',
-    mediumPlus: 'Medium+',
-    lowPlus: 'Low+',
+    allLevels: 'All',
+    criticalOnly: 'Critical (80+)',
+    highCritical: 'High (60+)',
+    mediumPlus: 'Medium (40+)',
+    lowPlus: 'All Articles',
     all: 'All',
-    viralOnly: 'Viral Only',
-    hotPlus: 'Hot+',
-    trendingPlus: 'Trending+',
-    risingPlus: 'Rising+',
+    viralOnly: 'Viral (800+)',
+    hotPlus: 'Hot (500+)',
+    trendingPlus: 'Trending (300+)',
+    risingPlus: 'Rising (150+)',
     allTime: 'All Time',
-    today: 'Today',
-    last24h: 'Last 24 Hours',
+    last24h: 'Last 24h',
     thisWeek: 'This Week',
     thisMonth: 'This Month',
     source: 'source',
@@ -102,8 +101,8 @@ const STRINGS = {
     none: 'Không',
     sourceAZ: 'Nguồn (A-Z)',
     sourceZA: 'Nguồn (Z-A)',
-    impactHighLow: 'Mức độ (Cao→Thấp)',
-    impactLowHigh: 'Mức độ (Thấp→Cao)',
+    impactHighLow: 'Mức độ (Cao - Thấp)',
+    impactLowHigh: 'Mức độ (Thấp - Cao)',
     gdeltRelevance: 'Điểm liên quan GDELT',
     byVolume: 'Theo lượt nhắc',
     newestFirst: 'Bài mới nhất trước',
@@ -115,39 +114,41 @@ const STRINGS = {
     of: 'của',
     articles: 'bài viết',
     allLevels: 'Tất cả',
-    criticalOnly: 'Chỉ quan trọng',
-    highCritical: 'Quan trọng & Cao',
-    mediumPlus: 'Trung bình+',
-    lowPlus: 'Thấp+',
+    criticalOnly: 'Quan trọng (80+)',
+    highCritical: 'Cao (60+)',
+    mediumPlus: 'Trung bình (40+)',
+    lowPlus: 'Tất cả',
     all: 'Tất cả',
-    viralOnly: 'Chỉ Viral',
-    hotPlus: 'Hot+',
-    trendingPlus: 'Xu hướng+',
-    risingPlus: 'Đang lên+',
+    viralOnly: 'Viral (800+)',
+    hotPlus: 'Hot (500+)',
+    trendingPlus: 'Xu hướng (300+)',
+    risingPlus: 'Đang lên (150+)',
     allTime: 'Mọi lúc',
-    today: 'Hôm nay',
     last24h: '24h qua',
     thisWeek: 'Tuần này',
     thisMonth: 'Tháng này',
-    source: 'nguồn',
+    source: 'Nguồn',
     impact: 'Mức độ',
   },
 } as const
 
-const SORT_OPTIONS = [
-  { value: 'relevance' as const, label: 'relevance', icon: Flame, description: 'gdeltRelevance', level: 'api' as const },
-  { value: 'volume-desc' as const, label: 'mostMentioned', icon: Eye, description: 'byVolume', level: 'api' as const },
-  { value: 'volume-asc' as const, label: 'leastMentioned', icon: Eye, description: 'byVolume', level: 'api' as const },
-  { value: 'date-desc' as const, label: 'newest', icon: Clock, description: 'newestFirst', level: 'api' as const },
-  { value: 'date-asc' as const, label: 'oldest', icon: Clock, description: 'oldestFirst', level: 'api' as const },
+// API sort options (affects data fetching)
+const API_SORT_OPTIONS = [
+  { value: 'relevance' as const, label: 'relevance', icon: Flame, description: 'gdeltRelevance' },
+  { value: 'date-desc' as const, label: 'newest', icon: Clock, description: 'newestFirst' },
+  { value: 'date-asc' as const, label: 'oldest', icon: Clock, description: 'oldestFirst' },
+  { value: 'volume-desc' as const, label: 'mostMentioned', icon: Eye, description: 'byVolume' },
+  { value: 'volume-asc' as const, label: 'leastMentioned', icon: Eye, description: 'byVolume' },
 ]
 
+// Client sort options (re-orders fetched data)
 const CLIENT_SORT_OPTIONS = [
-  { value: 'none' as const, label: 'none', icon: Activity, description: 'useApiOrder', level: 'client' as const },
-  { value: 'source-asc' as const, label: 'sourceAZ', icon: Newspaper, description: 'bySourceName', level: 'client' as const },
-  { value: 'source-desc' as const, label: 'sourceZA', icon: Newspaper, description: 'bySourceName', level: 'client' as const },
-  { value: 'impact-desc' as const, label: 'impactHighLow', icon: Flame, description: 'byCalculatedImpact', level: 'client' as const },
-  { value: 'impact-asc' as const, label: 'impactLowHigh', icon: TrendingUp, description: 'byCalculatedImpact', level: 'client' as const },
+  { value: 'none' as const, label: 'none', icon: Activity, description: 'useApiOrder' },
+  { value: 'source-asc' as const, label: 'sourceAZ', icon: Newspaper, description: 'bySourceName' },
+  { value: 'source-desc' as const, label: 'sourceZA', icon: Newspaper, description: 'bySourceName' },
+  { value: 'impact-desc' as const, label: 'impactHighLow', icon: TrendingDown, description: 'byCalculatedImpact' },
+  { value: 'impact-asc' as const, label: 'impactLowHigh', icon: TrendingUp, description: 'byCalculatedImpact' },
+
 ]
 
 const IMPACT_LEVELS = [
@@ -168,7 +169,6 @@ const TRENDING_LEVELS = [
 
 const TIME_RANGES = [
   { value: 'all' as const, label: 'allTime', hours: 0 },
-  { value: 'today' as const, label: 'today', hours: 24 },
   { value: '24h' as const, label: 'last24h', hours: 24 },
   { value: 'week' as const, label: 'thisWeek', hours: 168 },
   { value: 'month' as const, label: 'thisMonth', hours: 720 },
@@ -223,7 +223,7 @@ export function FilterAndSortBar({
           <PopoverTrigger asChild>
             <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" disabled={loading}>
               <Flame className="h-3.5 w-3.5 text-primary" />
-              {t[SORT_OPTIONS.find(s => s.value === apiSort)!.label]}
+              {t[API_SORT_OPTIONS.find(s => s.value === apiSort)!.label]}
               <ChevronDown className="h-3 w-3" />
             </Button>
           </PopoverTrigger>
@@ -232,7 +232,7 @@ export function FilterAndSortBar({
               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">{t.apiSort}</p>
             </div>
             <div className="p-1.5 pt-1 space-y-0.5">
-              {SORT_OPTIONS.map((option) => {
+              {API_SORT_OPTIONS.map((option) => {
                 const Icon = option.icon
                 return (
                   <button
@@ -393,12 +393,12 @@ export function FilterAndSortBar({
                       <button
                         key={source}
                         onClick={() => {
-                          setFilters(f => ({
-                            ...f,
-                            sources: f.sources.includes(source)
-                              ? f.sources.filter(s => s !== source)
-                              : [...f.sources, source]
-                          }))
+                          setFilters({
+                            ...filters,
+                            sources: filters.sources.includes(source)
+                              ? filters.sources.filter((s) => s !== source)
+                              : [...filters.sources, source]
+                          })
                         }}
                         className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                           filters.sources.includes(source)
@@ -412,11 +412,6 @@ export function FilterAndSortBar({
                   </div>
                 </div>
               )}
-
-              {/* Apply Button */}
-              <Button className="w-full" size="sm" onClick={resetFilters}>
-                {t.resetAll}
-              </Button>
             </div>
           </PopoverContent>
         </Popover>

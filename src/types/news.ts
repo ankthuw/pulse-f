@@ -11,4 +11,6 @@ export interface NewsArticle {
   relativeDate?: string
   importance: number
   views: number
+  tone?: number | null
+  goldsteinScale?: number | null
 }

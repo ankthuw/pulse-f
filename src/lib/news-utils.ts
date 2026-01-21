@@ -1,7 +1,7 @@
 import { Flame, TrendingUp, Zap, ArrowUpRight } from 'lucide-react'
 
 export function getImpactBadge(importance: number) {
-  if (importance > 75) {
+  if (importance >= 80) {
     return {
       level: 'critical',
       label: 'Critical',
@@ -12,7 +12,7 @@ export function getImpactBadge(importance: number) {
       barColor: 'bg-red-500',
     }
   }
-  if (importance > 50) {
+  if (importance >= 60) {
     return {
       level: 'high',
       label: 'High',
@@ -23,7 +23,7 @@ export function getImpactBadge(importance: number) {
       barColor: 'bg-orange-500',
     }
   }
-  if (importance > 25) {
+  if (importance >= 40) {
     return {
       level: 'medium',
       label: 'Medium',

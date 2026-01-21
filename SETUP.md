@@ -46,7 +46,7 @@ npx next dev -p 3001
 
 ### Windows (Command Prompt)
 
-```cmd
+```bash
 # 1. Install dependencies
 npm install
 

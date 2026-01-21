@@ -9,6 +9,14 @@ import { NewsArticle } from '@/types/news'
 interface NewsCardProps {
   article: NewsArticle
   lang?: 'en' | 'vi'
+  /**
+   * If true, visually indicate this article has been read (e.g. faded or border)
+   */
+  read?: boolean
+  /**
+   * Callback when article link is clicked
+   */
+  onClick?: () => void
 }
 
 // Impact badge helper
@@ -44,13 +52,19 @@ const STRINGS = {
   },
 } as const
 
-export function NewsCard({ article, lang = 'en' }: NewsCardProps) {
+export function NewsCard({ article, lang = 'en', read = false, onClick }: NewsCardProps) {
   const impact = getImpactBadge(article.importance)
   const trending = getTrendingBadge(article.views)
   const t = STRINGS[lang]
 
+  // Add visual indicator for read articles
+  const cardClass = [
+    "group overflow-hidden border border-border/50 bg-card/50 backdrop-blur-sm hover:border-primary/30 hover:shadow-xl hover:shadow-primary/5 transition-all duration-300",
+    read ? "opacity-75 border-blue-400/50 bg-blue-50/20 dark:bg-blue-950/10" : ""
+  ].join(" ")
+
   return (
-    <Card className="group overflow-hidden border border-border/50 bg-card/50 backdrop-blur-sm hover:border-primary/30 hover:shadow-xl hover:shadow-primary/5 transition-all duration-300">
+    <Card className={cardClass}>
       {/* Image Section */}
       <div className="relative h-48 overflow-hidden bg-muted">
         {article.imageUrl ? (
@@ -153,6 +167,7 @@ export function NewsCard({ article, lang = 'en' }: NewsCardProps) {
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center justify-center gap-1.5"
+            onClick={onClick}
           >
             <ExternalLink className="h-3 w-3" />
             <span>{t.readButton}</span>

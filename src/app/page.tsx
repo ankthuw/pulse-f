@@ -6,13 +6,18 @@ import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { RefreshCw, HelpCircle, Newspaper, Filter, X, ChevronDown, Flame, Zap, ArrowUpRight, TrendingUp, Activity, Clock } from 'lucide-react'
+import { RefreshCw, HelpCircle, Newspaper, Filter, X, ChevronDown, Flame, Zap, ArrowUpRight, TrendingUp, Activity, Clock, BookOpen } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 import { NewsCard } from '@/components/news-card'
+import { StopLineCard } from '@/components/stop-line-card'
 import { FilterAndSortBar, ApiSortOption, ClientSortOption, FilterState } from '@/components/filter-sort-bar'
 import { GoogleTranslateScript, TranslateToggle } from '@/components/google-translate-widget'
+import { FilterNegativeButton } from '@/components/filter-negative-button'
 import { NewsArticle } from '@/types/news'
 import { getImpactBadge } from '@/lib/news-utils'
+import { trackStopLineBypass, trackExplainersViewed, trackExplainerClicked, getAnalyticsSummary } from '@/lib/analytics-utils'
+
+const STOP_LINE_COUNT = 12
 
 const CATEGORIES = [
   { id: 'all', label: 'All News', icon: Newspaper },
@@ -26,6 +31,11 @@ const CATEGORIES = [
 ]
 
 export default function NewsPage() {
+  // Stop line state
+  const [showBeyondStopLine, setShowBeyondStopLine] = useState(false)
+  const [showExplainers, setShowExplainers] = useState(false)
+  // Filter negative content
+  const [filterNegative, setFilterNegative] = useState(false)
   const [articles, setArticles] = useState<NewsArticle[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -84,6 +94,11 @@ export default function NewsPage() {
   useEffect(() => {
     fetchNews(false)
   }, [selectedCategory, apiSort])
+
+  // Log analytics summary on mount (for debugging)
+  useEffect(() => {
+    console.log(getAnalyticsSummary())
+  }, [])
 
   const handleRefresh = () => {
     fetchNews(true, true)
@@ -157,11 +172,26 @@ export default function NewsPage() {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   }
 
-  // Apply filters and client-side sorting
+  // Store total articles before filtering for filter button
+  const totalBeforeEmotionFilter = useMemo(() => {
+    return selectedCategory === 'all'
+      ? articles.length
+      : articles.filter(article => article.category.toLowerCase() === selectedCategory.toLowerCase()).length
+  }, [articles, selectedCategory])
+
+  // Apply filters and client-side sorting, including negative filter
   const processedArticles = useMemo(() => {
     let filtered = selectedCategory === 'all'
       ? [...articles]
       : articles.filter(article => article.category.toLowerCase() === selectedCategory.toLowerCase())
+
+    // Filter negative content (tone < -3)
+    if (filterNegative) {
+      filtered = filtered.filter(article => {
+        const tone = article.tone
+        return typeof tone !== 'number' || tone >= -3
+      })
+    }
 
     // Apply impact level filter
     if (filters.impactLevel !== 'all') {
@@ -186,7 +216,7 @@ export default function NewsPage() {
 
     // Apply time range filter
     if (filters.timeRange !== 'all') {
-      const hoursMap = { today: 24, '24h': 24, week: 168, month: 720 }
+      const hoursMap = { '24h': 24, week: 168, month: 720 }
       const hours = hoursMap[filters.timeRange as keyof typeof hoursMap]
       if (hours) {
         const cutoff = Date.now() - (hours * 60 * 60 * 1000)
@@ -223,7 +253,163 @@ export default function NewsPage() {
           return 0
       }
     })
-  }, [articles, selectedCategory, filters, clientSort])
+  }, [articles, selectedCategory, filters, clientSort, filterNegative])
+
+  // Track read articles based on clicks (not visibility)
+  const [readArticleIds, setReadArticleIds] = useState<Set<string>>(new Set())
+  const [clickedArticles, setClickedArticles] = useState<Map<string, number>>(new Map()) // articleId -> timestamp
+  
+  // Load read articles from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('pulse_read_articles_v1')
+        if (stored) {
+          const parsed = JSON.parse(stored)
+          const today = new Date().toDateString()
+          // Only keep read articles from today
+          if (parsed.date === today) {
+            setReadArticleIds(new Set(parsed.ids || []))
+          } else {
+            // Clear old data
+            localStorage.removeItem('pulse_read_articles_v1')
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load read articles:', e)
+      }
+    }
+  }, [])
+  
+  // Handle article click - track the timestamp
+  const handleArticleClick = (articleId: string) => {
+    console.log('[Click] Article clicked:', articleId)
+    setClickedArticles(prev => new Map(prev).set(articleId, Date.now()))
+  }
+  
+  // When page regains focus, check clicked articles and mark as read if enough time passed
+  useEffect(() => {
+    const handleFocus = () => {
+      console.log('[Focus] Page regained focus, checking clicked articles...')
+      const now = Date.now()
+      const minTimeAway = 5000 // 5 seconds minimum on article page
+      const newReadArticles = new Set(readArticleIds)
+      let hasNewReads = false
+      
+      clickedArticles.forEach((clickTime, articleId) => {
+        const timeAway = now - clickTime
+        if (timeAway >= minTimeAway && !readArticleIds.has(articleId)) {
+          console.log(`[Read] Article ${articleId} marked as read (away ${Math.round(timeAway/1000)}s)`)
+          newReadArticles.add(articleId)
+          hasNewReads = true
+        }
+      })
+      
+      if (hasNewReads) {
+        setReadArticleIds(newReadArticles)
+        // Save to localStorage
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem('pulse_read_articles_v1', JSON.stringify({
+              date: new Date().toDateString(),
+              ids: Array.from(newReadArticles)
+            }))
+          } catch (e) {
+            console.error('Failed to save read articles:', e)
+          }
+        }
+        // Clear clicked articles that are now marked as read
+        setClickedArticles(prev => {
+          const next = new Map(prev)
+          newReadArticles.forEach(id => next.delete(id))
+          return next
+        })
+      }
+    }
+    
+    window.addEventListener('focus', handleFocus)
+    return () => window.removeEventListener('focus', handleFocus)
+  }, [clickedArticles, readArticleIds])
+  
+  const trackedReadCount = readArticleIds.size
+  const isArticleRead = (articleId: string) => readArticleIds.has(articleId)
+
+  // Smart Explainers: High-quality, unread articles with diverse sources
+  // Prioritizes user's selected category and ensures variety
+  const explainers = useMemo(() => {
+    console.log('[Explainers] Starting search with', processedArticles.length, 'total articles')
+    console.log('[Explainers] Already read:', readArticleIds.size, 'articles')
+    console.log('[Explainers] Current category:', selectedCategory)
+    
+    // 1. Filter for high-quality explainer candidates (unread first)
+    let candidates = processedArticles.filter(a => 
+      a.importance >= 70 && 
+      a.views >= 200 && 
+      a.views <= 1500 &&
+      !isArticleRead(a.id)
+    )
+    
+    console.log('[Explainers] Found', candidates.length, 'unread candidates (importance ≥70, views 200-1500)')
+    
+    // Fallback: if no unread candidates, include read articles but lower the threshold
+    if (candidates.length === 0) {
+      candidates = processedArticles.filter(a => 
+        a.importance >= 65 && 
+        a.views >= 100 && 
+        a.views <= 2000
+      )
+      console.log('[Explainers] Fallback: Found', candidates.length, 'candidates (relaxed criteria: importance ≥65, views 100-2000)')
+    }
+    
+    if (candidates.length === 0) {
+      console.log('[Explainers] No candidates found even with relaxed criteria')
+      return []
+    }
+    
+    // 2. Calculate smart score: importance + recency bonus + category match
+    const scored = candidates.map(article => {
+      let score = article.importance
+      
+      // Recency bonus: articles from last 12 hours get +5 points
+      const hoursSincePublished = (Date.now() - new Date(article.publishedAt).getTime()) / (1000 * 60 * 60)
+      if (hoursSincePublished < 12) score += 5
+      
+      // Category match bonus: if viewing specific category, boost matching articles
+      if (selectedCategory !== 'all' && article.category === selectedCategory) {
+        score += 10
+      }
+      
+      return { article, score }
+    })
+    
+    // 3. Sort by score and ensure source diversity
+    const sorted = scored.sort((a, b) => b.score - a.score)
+    const diversified: typeof scored = []
+    const usedDomains = new Set<string>()
+    
+    // First pass: pick top articles with unique domains
+    for (const item of sorted) {
+      const domain = item.article.source.replace('www.', '')
+      if (!usedDomains.has(domain) && diversified.length < 5) {
+        diversified.push(item)
+        usedDomains.add(domain)
+      }
+    }
+    
+    // Second pass: fill remaining slots if needed
+    if (diversified.length < 5) {
+      for (const item of sorted) {
+        if (!diversified.includes(item) && diversified.length < 5) {
+          diversified.push(item)
+        }
+      }
+    }
+    
+    const result = diversified.map(item => item.article)
+    console.log('[Explainers] Selected', result.length, 'articles with source diversity')
+    result.forEach((a, i) => console.log(`  ${i+1}. [${a.source}] ${a.title.substring(0, 60)}... (importance: ${a.importance})`))
+    return result
+  }, [processedArticles, readArticleIds, selectedCategory])
 
   const ImpactBadge = ({ label, bg, text, border, icon: Icon }: any) => (
     <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg ${bg} ${text} ${border} border shadow-sm`}>
@@ -386,19 +572,28 @@ export default function NewsPage() {
           </TabsList>
 
           <TabsContent value={selectedCategory} className="mt-0 focus-visible:outline-none focus-visible:ring-0">
-            {/* Filter and Sort Bar */}
+            {/* Filter and Sort Bar + Filter Negative Button */}
             {!loading && articles.length > 0 && (
-              <FilterAndSortBar
-                articles={articles}
-                filters={filters}
-                setFilters={setFilters}
-                apiSort={apiSort}
-                setApiSort={setApiSort}
-                clientSort={clientSort}
-                setClientSort={setClientSort}
-                loading={loading}
-                lang="en"
-              />
+              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+                <FilterAndSortBar
+                  articles={articles}
+                  filters={filters}
+                  setFilters={setFilters}
+                  apiSort={apiSort}
+                  setApiSort={setApiSort}
+                  clientSort={clientSort}
+                  setClientSort={setClientSort}
+                  loading={loading}
+                  lang="en"
+                />
+                <FilterNegativeButton
+                  enabled={filterNegative}
+                  onChange={setFilterNegative}
+                  totalArticles={totalBeforeEmotionFilter}
+                  filteredArticles={processedArticles.length}
+                  lang="en"
+                />
+              </div>
             )}
 
             {loading ? (
@@ -436,15 +631,98 @@ export default function NewsPage() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                {processedArticles.map((article) => (
-                  <NewsCard
-                    key={article.id}
-                    article={{ ...article, relativeDate: formatDate(article.publishedAt) }}
-                    lang="en"
-                  />
-                ))}
-              </div>
+              <>
+                {/* Feed with StopLineCard and Explainers logic */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                  {processedArticles.slice(0, STOP_LINE_COUNT).map((article) => (
+                    <NewsCard
+                      key={article.id}
+                      article={{ ...article, relativeDate: formatDate(article.publishedAt) }}
+                      lang="en"
+                      onClick={() => handleArticleClick(article.id)}
+                      read={isArticleRead(article.id)}
+                    />
+                  ))}
+                  {/* StopLineCard - only show if user has actually read some articles */}
+                  {!showBeyondStopLine && processedArticles.length > STOP_LINE_COUNT && trackedReadCount >= 3 && (
+                    <div className="col-span-full">
+                      <StopLineCard
+                        readCount={trackedReadCount}
+                        onContinue={() => {
+                          setShowBeyondStopLine(true)
+                          trackStopLineBypass()
+                        }}
+                        onShowExplainers={() => {
+                          setShowExplainers(true)
+                          trackExplainersViewed()
+                        }}
+                      />
+                    </div>
+                  )}
+                  {/* Show rest of feed if user continues */}
+                  {showBeyondStopLine && processedArticles.slice(STOP_LINE_COUNT).map((article) => (
+                    <NewsCard
+                      key={article.id}
+                      article={{ ...article, relativeDate: formatDate(article.publishedAt) }}
+                      lang="en"
+                      onClick={() => handleArticleClick(article.id)}
+                      read={isArticleRead(article.id)}
+                    />
+                  ))}
+                </div>
+                {/* Explainers section */}
+                {showExplainers && (
+                  <div className="mt-10">
+                    <div className="mb-6 p-4 bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 border border-primary/20 rounded-xl shadow-sm">
+                      <div className="flex items-center gap-2 mb-2">
+                        <BookOpen className="h-5 w-5 text-primary" />
+                        <h2 className="text-xl font-bold">Explainers & Deep Dives</h2>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {explainers.length > 0 
+                          ? `High-quality articles selected for deeper understanding • ${explainers.length} articles`
+                          : 'No explainers available for current filters. Try adjusting your filters or category.'}
+                      </p>
+                    </div>
+                    {explainers.length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {explainers.map(article => (
+                          <div 
+                            key={article.id} 
+                            className="relative"
+                            onClick={() => trackExplainerClicked(article.id)}
+                          >
+                            <div className="absolute -top-2 -right-2 z-10">
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold bg-primary text-primary-foreground shadow-md">
+                                Explainer
+                              </span>
+                            </div>
+                            <NewsCard
+                              article={{ ...article, relativeDate: formatDate(article.publishedAt) }}
+                              lang="en"
+                              onClick={() => {
+                                handleArticleClick(article.id)
+                                trackExplainerClicked(article.id)
+                              }}
+                              read={isArticleRead(article.id)}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <Card className="p-8 text-center bg-card/50 backdrop-blur-sm">
+                        <BookOpen className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                        <p className="text-muted-foreground mb-2">
+                          No high-quality explainers available right now.
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          Check back after the next news refresh.
+                        </p>
+                      </Card>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </TabsContent>
         </Tabs>
