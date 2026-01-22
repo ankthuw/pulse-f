@@ -7,18 +7,22 @@ Fetches ALL raw GKG fields for a single day and stores in SQLite.
 import os
 import sys
 import sqlite3
+import re
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
 
-from google.cloud import bigquery
 
+from google.cloud import bigquery
+load_dotenv()
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "gdelt-483607")
+# PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "gdelt-485102")
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "gdelt-485102")
 DB_DIR = Path("db")
 
 
@@ -39,7 +43,13 @@ class GKGFetcher:
     """Fetches ALL GKG data from BigQuery."""
 
     def __init__(self, project_id: str = PROJECT_ID):
-        self.client = bigquery.Client(project=project_id)
+        try:
+            self.client = bigquery.Client(project=project_id)
+        except Exception as e:
+            # If credentials aren't available or client fails to initialize,
+            # fall back to None and let fetch() handle the absence gracefully.
+            print(f"[GKGFetcher] Warning: could not create BigQuery client: {e}")
+            self.client = None
 
     def fetch(self, target_date: str, max_records: int = MAX_RECORDS) -> list:
         """Fetch ALL GKG records for a date."""
@@ -85,10 +95,39 @@ class GKGFetcher:
         LIMIT {max_records}
         """
 
-        result = self.client.query(query).result()
+        if not self.client:
+            print("[GKGFetcher] No BigQuery client available, returning empty record set.")
+            return []
+
+        try:
+            result = self.client.query(query).result()
+        except Exception as e:
+            print(f"[GKGFetcher] BigQuery query failed: {e}")
+            return []
 
         records = []
         for row in result:
+            # Parse V2Tone -> tone_value (try to extract numeric part)
+            tone_value = None
+            try:
+                v2t = row.V2Tone or ''
+                parts = v2t.split(',')
+                if len(parts) > 1:
+                    tone_value = float(parts[1])
+            except Exception:
+                tone_value = None
+
+            # Parse V2Counts -> mention_count (try to extract first integer)
+            mention_count = None
+            try:
+                v2c = row.V2Counts or ''
+                nums = re.findall(r"\d+", v2c)
+                if nums:
+                    # Heuristic: take the largest number found
+                    mention_count = int(max(nums, key=lambda x: int(x)))
+            except Exception:
+                mention_count = None
+
             records.append({
                 'gkg_record_id': str(row.GKGRECORDID) if row.GKGRECORDID else None,
                 'date': str(row.DATE) if row.DATE else None,
@@ -98,6 +137,7 @@ class GKGFetcher:
                 'document_identifier': row.DocumentIdentifier,
                 'counts': row.Counts,
                 'v2_counts': row.V2Counts,
+                'mention_count': mention_count,
                 'themes': row.Themes,
                 'v2_themes': row.V2Themes,
                 'locations': row.Locations,
@@ -107,6 +147,7 @@ class GKGFetcher:
                 'organizations': row.Organizations,
                 'v2_organizations': row.V2Organizations,
                 'v2_tone': row.V2Tone,
+                'tone_value': tone_value,
                 'dates': row.Dates,
                 'gcam': row.GCAM,
                 'sharing_image': row.SharingImage,
@@ -153,6 +194,7 @@ class GKGDatabase:
                 document_identifier TEXT,
                 counts TEXT,
                 v2_counts TEXT,
+                mention_count INTEGER,
                 themes TEXT,
                 v2_themes TEXT,
                 locations TEXT,
@@ -162,6 +204,7 @@ class GKGDatabase:
                 organizations TEXT,
                 v2_organizations TEXT,
                 v2_tone TEXT,
+                tone_value REAL,
                 dates TEXT,
                 gcam TEXT,
                 sharing_image TEXT,
@@ -180,6 +223,7 @@ class GKGDatabase:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gkg_date ON gkg(date)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gkg_source ON gkg(source_common_name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gkg_record_id ON gkg(gkg_record_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gkg_document_identifier ON gkg(document_identifier)")
 
         conn.commit()
         conn.close()
@@ -193,17 +237,17 @@ class GKGDatabase:
             cursor.execute("""
                 INSERT INTO gkg (
                     gkg_record_id, date, date_ts, source_collection_id, source_common_name, document_identifier,
-                    counts, v2_counts, themes, v2_themes, locations, v2_locations,
-                    persons, v2_persons, organizations, v2_organizations, v2_tone,
+                    counts, v2_counts, mention_count, themes, v2_themes, locations, v2_locations,
+                    persons, v2_persons, organizations, v2_organizations, v2_tone, tone_value,
                     dates, gcam, sharing_image, related_images, social_image_embeds,
                     social_video_embeds, quotations, all_names, amounts, translation_info, extras
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 r['gkg_record_id'], r['date'], r['date_ts'], r['source_collection_id'], r['source_common_name'], r['document_identifier'],
-                r['counts'], r['v2_counts'], r['themes'], r['v2_themes'], r['locations'], r['v2_locations'],
-                r['persons'], r['v2_persons'], r['organizations'], r['v2_organizations'], r['v2_tone'],
-                r['dates'], r['gcam'], r['sharing_image'], r['related_images'], r['social_image_embeds'],
-                r['social_video_embeds'], r['quotations'], r['all_names'], r['amounts'], r['translation_info'], r['extras']
+                r['counts'], r.get('v2_counts'), r.get('mention_count'), r.get('themes'), r.get('v2_themes'), r.get('locations'), r.get('v2_locations'),
+                r.get('persons'), r.get('v2_persons'), r.get('organizations'), r.get('v2_organizations'), r.get('v2_tone'), r.get('tone_value'),
+                r.get('dates'), r.get('gcam'), r.get('sharing_image'), r.get('related_images'), r.get('social_image_embeds'),
+                r.get('social_video_embeds'), r.get('quotations'), r.get('all_names'), r.get('amounts'), r.get('translation_info'), r.get('extras')
             ))
 
         conn.commit()

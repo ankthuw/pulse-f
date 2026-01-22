@@ -7,18 +7,20 @@ Fetches ALL raw Event fields for a single day and stores in SQLite.
 import os
 import sys
 import sqlite3
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from pathlib import Path
 import argparse
 
 from google.cloud import bigquery
-
+load_dotenv()
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "gdelt-483607")
+# PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "gdelt-483607")
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "gdelt-483607")
 DB_DIR = Path("db")
 
 

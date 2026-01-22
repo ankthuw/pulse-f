@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { enrichArticlesFromLocalGKG } from '@/lib/gdelt-enrichment-v2'
+import { enrichArticlesWithEvents, calculateProvisionalScore } from '@/lib/event-enrichment-v2'
 
 // GDELT doc API endpoint
 const GDELT_DOC_API = 'https://api.gdeltproject.org/api/v2/doc/doc'
@@ -301,12 +303,59 @@ export async function GET(request: NextRequest) {
 
     const resultArticles = uniqueArticles.slice(0, 100)
 
-    console.log(`[API] Returning ${resultArticles.length} articles`)
+    console.log(`[API] Starting enrichment for ${resultArticles.length} articles...`)
+    
+    // Log article date range for debugging
+    const dates = resultArticles.map(a => a.seendate).filter(Boolean).sort()
+    if (dates.length > 0) {
+      console.log(`[API] Article date range: ${dates[0]} to ${dates[dates.length - 1]}`)
+      const now = new Date()
+      const oldestDate = new Date(dates[0])
+      const daysOld = Math.floor((now.getTime() - oldestDate.getTime()) / (1000 * 60 * 60 * 24))
+      console.log(`[API] Oldest article is ${daysOld} days old`)
+    }
+
+    // Enrich from local daily GKG DB (fast, optional)
+    const gkgEnriched = await enrichArticlesFromLocalGKG(resultArticles)
+    const gkgCount = gkgEnriched.filter(a => a._gkg_enriched).length
+    console.log(`[API] GKG enrichment complete: ${gkgCount}/${resultArticles.length} articles enriched`)
+    
+    // Enrich with event-level metadata (globaleventid, goldsteinscale, avg_tone)
+    const eventEnriched = await enrichArticlesWithEvents(gkgEnriched)
+    const eventCount = eventEnriched.filter(a => a._event_enriched).length
+    console.log(`[API] Event enrichment complete: ${eventCount}/${resultArticles.length} articles enriched`)
+    
+    // Calculate impact scores (full or provisional) and REPLACE old importance field
+    const withScores = eventEnriched.map(article => {
+      const { score, provisional } = calculateProvisionalScore(article)
+      return {
+        ...article,
+        importance: score,  // Replace old importance with calculated impact score
+        impact_score: score,  // Also keep as impact_score for backward compatibility
+        score_provisional: provisional,
+      }
+    })
+    
+    // Debug: log a sample enriched article to see what data we have
+    const sampleEnriched = withScores.find(a => a._gkg_enriched)
+    if (sampleEnriched) {
+      console.log('[API] Sample GKG enriched article:', {
+        url: sampleEnriched.url?.slice(0, 60),
+        gkg: sampleEnriched.gkg,
+        score: sampleEnriched.impact_score
+      })
+    }
+    
+    const provisionalCount = withScores.filter(a => a.score_provisional).length
+    const fullScoreCount = withScores.length - provisionalCount
+    console.log(`[API] Impact scores: ${fullScoreCount} full, ${provisionalCount} provisional`)
+
+    console.log(`[API] Returning ${withScores.length} articles`)
 
     return NextResponse.json({
-      articles: resultArticles,
+      articles: withScores,
       cached: false,
-      count: resultArticles.length,
+      count: withScores.length,
       source: 'gdelt',
     })
   } catch (error) {
