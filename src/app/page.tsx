@@ -16,6 +16,7 @@ import { FilterNegativeButton } from '@/components/filter-negative-button'
 import { NewsArticle } from '@/types/news'
 import { getImpactBadge } from '@/lib/news-utils'
 import { trackStopLineBypass, trackExplainersViewed, trackExplainerClicked, getAnalyticsSummary } from '@/lib/analytics-utils'
+import { newsCache } from '@/lib/news-cache'
 
 const STOP_LINE_COUNT = 12
 
@@ -64,18 +65,66 @@ export default function NewsPage() {
     }
 
     try {
+      // Skip cache if force refresh
+      if (!forceRefresh) {
+        console.log(`[news] Checking cache for category=${selectedCategory}, sort=${apiSort}`)
+        const cachedArticles = await newsCache.get(selectedCategory, 'en', apiSort)
+
+        if (cachedArticles && cachedArticles.length > 0) {
+          console.log(`[news] Cache hit! Using ${cachedArticles.length} cached articles`)
+          setArticles(cachedArticles)
+          setLastUpdated(new Date())
+          setLoading(false)
+          setRefreshing(false)
+
+          if (showRefreshToast) {
+            toast({
+              title: 'Loaded from cache',
+              description: `${cachedArticles.length} articles (cached)`,
+            })
+          }
+          return
+        }
+      }
+
+      console.log(`[news] Cache miss, fetching from API...`)
+
+      // Fetch from API if cache miss or force refresh
       const refreshParam = forceRefresh ? '&refresh=true' : ''
       const response = await fetch(`/api/news?category=${selectedCategory}&sort=${apiSort}${refreshParam}`)
       if (!response.ok) throw new Error('Failed to fetch news')
 
       const data = await response.json()
-      setArticles(data.articles || [])
+      const fetchedArticles = data.articles || []
+
+      // Store in cache
+      await newsCache.set(selectedCategory, 'en', apiSort, fetchedArticles, false)
+
+      // If fetching 'all' category, also cache individual articles for category switches
+      if (selectedCategory === 'all') {
+        const categoryGroups = new Map<string, any[]>()
+        for (const article of fetchedArticles) {
+          const cat = article.category || 'other'
+          if (!categoryGroups.has(cat)) {
+            categoryGroups.set(cat, [])
+          }
+          categoryGroups.get(cat)!.push(article)
+        }
+
+        for (const [cat, catArticles] of categoryGroups.entries()) {
+          if (catArticles.length > 0) {
+            await newsCache.set(cat, 'en', apiSort, catArticles, true)
+          }
+        }
+      }
+
+      setArticles(fetchedArticles)
       setLastUpdated(new Date())
 
       if (showRefreshToast) {
         toast({
           title: 'News updated',
-          description: 'Latest articles loaded successfully',
+          description: `${fetchedArticles.length} articles loaded`,
         })
       }
     } catch (error) {

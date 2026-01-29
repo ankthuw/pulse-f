@@ -21,7 +21,7 @@ node_modules
 /build
 
 # documentation
-/docs/
+# /docs/
 
 # misc
 .DS_Store
@@ -50,3 +50,6 @@ test
 prompt
 
 server.log
+
+# env
+.env

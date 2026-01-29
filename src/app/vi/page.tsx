@@ -12,6 +12,7 @@ import { FilterAndSortBar, ApiSortOption, ClientSortOption, FilterState } from '
 import { GoogleTranslateScript, TranslateToggle } from '@/components/google-translate-widget'
 import { NewsArticle } from '@/types/news'
 import { getImpactBadge } from '@/lib/news-utils'
+import { newsCache } from '@/lib/news-cache'
 
 const CATEGORIES = [
   { id: 'all', label: 'Tất cả', icon: Newspaper },
@@ -42,7 +43,7 @@ export default function VietnameseNewsPage() {
     sources: [],
   })
 
-  const fetchNews = async (showToast = false) => {
+  const fetchNews = async (showToast = false, forceRefresh = false) => {
     if (showToast) {
       setRefreshing(true)
     } else {
@@ -50,16 +51,66 @@ export default function VietnameseNewsPage() {
     }
 
     try {
+      // Skip cache if force refresh
+      if (!forceRefresh) {
+        // Step 1: Check IndexedDB cache first
+        console.log(`[news] Checking cache for category=${selectedCategory}, sort=${apiSort}`)
+        const cachedArticles = await newsCache.get(selectedCategory, 'vi', apiSort)
+
+        if (cachedArticles && cachedArticles.length > 0) {
+          console.log(`[news] Cache hit! Using ${cachedArticles.length} cached articles`)
+          setArticles(cachedArticles)
+          setLoading(false)
+          setRefreshing(false)
+
+          if (showToast) {
+            toast({
+              title: 'Đã tải từ cache',
+              description: `${cachedArticles.length} bài viết (cached)`,
+            })
+          }
+          return
+        }
+      }
+
+      console.log(`[news] Cache miss, fetching from API...`)
+
+      // Step 2: Fetch from API if cache miss
       const response = await fetch(`/api/news?category=${selectedCategory}&lang=vi&sort=${apiSort}`)
       if (!response.ok) throw new Error('Failed to fetch news')
 
       const data = await response.json()
-      setArticles(data.articles || [])
+      const fetchedArticles = data.articles || []
+
+      // Step 3: Store in cache for future use
+      await newsCache.set(selectedCategory, 'vi', apiSort, fetchedArticles, false)
+
+      // If fetching 'all' category, also cache individual articles for category switches
+      if (selectedCategory === 'all') {
+        // Group articles by their actual category
+        const categoryGroups = new Map<string, any[]>()
+        for (const article of fetchedArticles) {
+          const cat = article.category || 'other'
+          if (!categoryGroups.has(cat)) {
+            categoryGroups.set(cat, [])
+          }
+          categoryGroups.get(cat)!.push(article)
+        }
+
+        // Cache each category separately
+        for (const [cat, catArticles] of categoryGroups.entries()) {
+          if (catArticles.length > 0) {
+            await newsCache.set(cat, 'vi', apiSort, catArticles, true)
+          }
+        }
+      }
+
+      setArticles(fetchedArticles)
 
       if (showToast) {
         toast({
           title: 'Đã cập nhật',
-          description: 'Tin tức mới đã được tải',
+          description: `${fetchedArticles.length} tin tức mới đã được tải`,
         })
       }
     } catch (error) {
@@ -145,7 +196,7 @@ export default function VietnameseNewsPage() {
   }, [articles, selectedCategory, filters, clientSort])
 
   const handleRefresh = () => {
-    fetchNews(true)
+    fetchNews(true, true)  // Force refresh, skip cache
   }
 
   // Auto-refresh functionality
@@ -164,7 +215,7 @@ export default function VietnameseNewsPage() {
 
       // Set up interval
       intervalRef.current = setInterval(() => {
-        fetchNews(false) // Refresh without toast
+        fetchNews(false, true) // Auto-refresh: force skip cache for fresh data
         // Update next refresh time
         setNextRefreshTime(new Date(Date.now() + intervalMs))
       }, intervalMs)

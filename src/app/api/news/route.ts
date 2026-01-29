@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { enrichArticlesFromLocalGKG } from '@/lib/gdelt-enrichment-v2'
-import { enrichArticlesWithEvents, calculateProvisionalScore } from '@/lib/event-enrichment-v2'
+import { enrichArticlesWithGKGOptimized } from '@/lib/gdelt-enrichment-optimized'
+import { enrichArticlesWithEventsOptimized, calculateProvisionalScore } from '@/lib/event-enrichment-optimized'
+import { recategorizeArticles } from '@/lib/article-categorizer'
 
 // GDELT doc API endpoint
 const GDELT_DOC_API = 'https://api.gdeltproject.org/api/v2/doc/doc'
@@ -38,7 +39,7 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
     const params = new URLSearchParams({
       mode: 'artlist',
       format: 'json',
-      maxrecords: '250',
+      maxrecords: '100',  // Reduced from 250 for faster responses
       query: queryParts.join(' '),
       sort: SORT_PARAMS[sort] || 'HybridRel'
     })
@@ -47,7 +48,7 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
     console.log(`[GDELT] Fetching: ${url}`)
 
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(15000),  // Reduced from 30s to 15s
     })
 
     if (!response.ok) {
@@ -178,28 +179,15 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
 
       // Estimate tone from title (GDELT DOC API doesn't provide tone data)
       const tone = estimateTone(item.title || '')
-      
+
       // Debug: log tone estimation for first few articles
       if (index < 3) {
         console.log(`[GDELT] Article ${index}: "${(item.title || '').slice(0, 60)}" → tone=${tone}`)
       }
 
-      // Calculate importance based on multiple GDELT metrics (0-100 scale)
-      let importance = 30 // Base score
-      
-      // Tone contribution (max +30 points): positive tone = higher importance
-      if (typeof tone === 'number') {
-        importance += Math.round((tone + 10) * 1.5) // -10 to +10 → 0 to 30 points
-      }
-      
-      // Mentions/visibility contribution (max +40 points)
-      if (item.seenqty) {
-        const mentionScore = Math.min(item.seenqty / 10, 40) // Cap at 40 points
-        importance += Math.round(mentionScore)
-      }
-      
-      // Clamp to 0-100 range
-      importance = Math.round(Math.min(100, Math.max(0, importance)))
+      // Base importance score (will be replaced by enrichment-based scoring)
+      // This is just a fallback if enrichment fails
+      const importance = 30
 
       // Enrich: Try to infer real category for each article if category === 'all'
       let realCategory = category
@@ -208,8 +196,7 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
         const titleText = (item.title || '').toLowerCase()
         const domainText = (item.domain || '').toLowerCase()
         const urlText = (item.url || '').toLowerCase()
-        const combinedText = `${titleText} ${domainText} ${urlText}`
-        
+
         // Score each category based on keyword matches
         const categoryScores: Record<string, number> = {
           technology: 0,
@@ -220,27 +207,117 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
           entertainment: 0,
           politics: 0,
         }
-        
-        // Enhanced keyword patterns for better categorization
-        const categoryPatterns: Record<string, string[]> = {
-          technology: ['tech', 'software', 'ai', 'computer', 'digital', 'cyber', 'startup', 'app', 'data', 'code', 'programming', 'innovation', 'internet', 'web', 'mobile', 'gadget', 'device', 'phone', 'apple', 'google', 'microsoft', 'meta', 'tesla', 'spacex', 'amazon'],
-          business: ['business', 'economy', 'finance', 'market', 'stock', 'trade', 'company', 'corporate', 'investment', 'bank', 'revenue', 'profit', 'entrepreneur', 'ceo', 'investor', 'wall street', 'nasdaq', 'economic', 'financial'],
-          science: ['science', 'research', 'study', 'scientist', 'discovery', 'space', 'nasa', 'physics', 'chemistry', 'biology', 'climate', 'environment', 'energy', 'renewable', 'solar', 'experiment', 'laboratory'],
-          health: ['health', 'medical', 'hospital', 'doctor', 'patient', 'medicine', 'disease', 'treatment', 'vaccine', 'drug', 'wellness', 'fitness', 'mental health', 'healthcare', 'pharmaceutical', 'clinic'],
-          sports: ['sports', 'football', 'basketball', 'baseball', 'soccer', 'tennis', 'golf', 'olympics', 'championship', 'team', 'player', 'coach', 'game', 'match', 'tournament', 'league', 'nfl', 'nba', 'fifa'],
-          entertainment: ['entertainment', 'movie', 'film', 'music', 'concert', 'actor', 'actress', 'celebrity', 'hollywood', 'netflix', 'disney', 'streaming', 'show', 'series', 'album', 'song', 'artist', 'award', 'grammy', 'oscar'],
-          politics: ['politics', 'political', 'government', 'election', 'president', 'congress', 'senate', 'vote', 'law', 'policy', 'minister', 'parliament', 'democrat', 'republican', 'campaign', 'white house', 'legislation'],
+
+        // Refined keyword patterns - more specific, fewer generic words
+        const categoryPatterns: Record<string, { keywords: string[], negative: string[] }> = {
+          technology: {
+            keywords: [
+              'software', 'artificial intelligence', 'machine learning', 'programming', 'developer',
+              'cybersecurity', 'encryption', 'startup', 'apple', 'google', 'microsoft', 'meta', 'tesla',
+              'spacex', 'amazon', 'netflix', 'twitter', 'linkedin', 'instagram', 'tiktok', 'telegram',
+              'cloud computing', 'server', 'chip', 'processor', 'semiconductor', 'virtual reality',
+              'augmented reality', 'robot', 'automation', '5g', 'broadband', 'hack', 'cyberattack',
+              'data breach', 'malware', 'ransomware', 'coding', 'api', 'database', 'algorithm',
+              'blockchain', 'crypto', 'nft', 'web3', 'metaverse', 'chatgpt', 'openai', 'deep learning',
+              'gaming', 'playstation', 'xbox', 'ps5', 'ps4', 'nintendo', 'steam', 'dlc', 'game'
+            ],
+            negative: ['celebrity', 'gossip', 'weight loss', 'diet', 'plane crash', 'shooting', 'murder']
+          },
+          business: {
+            keywords: [
+              'stock market', 'wall street', 'nasdaq', 'dow jones', 's&p 500', 'ip', 'ipo', 'merger',
+              'acquisition', 'ceo', 'cto', 'cfo', 'venture capital', 'funding', 'investment', 'investor',
+              'revenue', 'profit', 'earnings', 'dividend', 'shareholder', 'economic', 'inflation',
+              'recession', 'gdp', 'monetary', 'fiscal', 'trade war', 'tariff', 'bankruptcy', 'layoff',
+              'unemployment', 'corporate', 'startup', 'entrepreneur', 'finance', 'financial', 'trading',
+              'commodity', 'forex', 'cryptocurrency', 'bitcoin', 'ethereum', 'market share',
+              'media company', 'news network', 'broadcast', 'publisher', 'media'
+            ],
+            negative: ['celebrity', 'gossip', 'weight loss', 'movie', 'concert', 'sports', 'game']
+          },
+          science: {
+            keywords: [
+              'research', 'study', 'scientific', 'scientist', 'discovery', 'space', 'nasa', 'physics',
+              'chemistry', 'biology', 'gene', 'genetic', 'laboratory', 'experiment', 'clinical trial',
+              'climate change', 'environment', 'energy', 'renewable', 'solar', 'wind', 'battery',
+              'quantum', 'particle', 'atom', 'molecule', 'nanotechnology', 'robotics', 'evolution',
+              'paleontology', 'archaeology', 'astronomy', 'cosmology', 'ecology', 'carbon emission',
+              'sustainable', 'materials science', 'chemistry', 'biochemistry', 'neuroscience',
+              'aurora', 'northern lights', 'comet', 'sky', 'solar system', 'planet', 'star', 'galaxy'
+            ],
+            negative: ['politics', 'election', 'government', 'celebrity', 'stock', 'market']
+          },
+          health: {
+            keywords: [
+              'hospital', 'doctor', 'nurse', 'patient', 'clinic', 'disease', 'virus', 'bacteria',
+              'infection', 'covid', 'coronavirus', 'pandemic', 'epidemic', 'outbreak', 'vaccine',
+              'vaccination', 'treatment', 'therapy', 'surgery', 'drug', 'pharmaceutical', 'fda',
+              'wellness', 'fitness', 'mental health', 'depression', 'anxiety', 'symptom', 'diagnosis',
+              'cure', 'recovery', 'rehab', 'medical', 'medicine', 'healthcare', 'nutrition', 'exercise'
+            ],
+            negative: ['politics', 'election', 'stock', 'market', 'celebrity', 'gossip']
+          },
+          sports: {
+            keywords: [
+              'football', 'soccer', 'basketball', 'baseball', 'tennis', 'golf', 'hockey', 'cricket',
+              'rugby', 'formula 1', 'racing', 'olympics', 'championship', 'league', 'match', 'tournament',
+              'nfl', 'nba', 'mlb', 'nhl', 'ufc', 'mma', 'boxing', 'wwe', 'athlete', 'athletics',
+              'world cup', 'super bowl', 'premier league', 'la liga', 'serie a', 'bundesliga', 'messi',
+              'ronaldo', 'neymar', 'mbappe', 'coach', 'referee', 'score', 'goal', 'touchdown'
+            ],
+            negative: ['politics', 'celebrity', 'movie', 'music', 'concert']
+          },
+          entertainment: {
+            keywords: [
+              'movie', 'film', 'cinema', 'music', 'concert', 'band', 'artist', 'singer', 'actor', 'actress',
+              'celebrity', 'hollywood', 'bollywood', 'streaming', 'disney+', 'hulu', 'hbo max', 'album',
+              'song', 'trailer', 'youtube', 'viral', 'award', 'grammy', 'oscar', 'emmy', 'golden globe',
+              'red carpet', 'premiere', 'gossip', 'cast', 'director', 'producer', 'screenplay', 'sequel',
+              'marvel', 'dc', 'anime', 'manga', 'concert tour', 'album release', 'net worth', 'pregnancy',
+              'breakups', 'tour', 'celebrates', 'birthday', 'wedding', 'divorce', 'relationship', 'dating'
+            ],
+            negative: ['politics', 'election', 'stock', 'market', 'sports', 'game']
+          },
+          politics: {
+            keywords: [
+              'election', 'vote', 'voting', 'ballot', 'poll', 'president', 'presidential', 'congress',
+              'senate', 'house', 'representative', 'senator', 'governor', 'mayor', 'legislation', 'bill',
+              'policy', 'diplomat', 'diplomacy', 'treaty', 'summit', 'campaign', 'candidate', 'cabinet',
+              'administration', 'regulation', 'ruling', 'court', 'judge', 'justice', 'minister', 'parliament',
+              'democrat', 'republican', 'liberal', 'conservative', 'partisan', 'bipartisan', 'federal'
+            ],
+            negative: ['celebrity', 'gossip', 'movie', 'music', 'concert', 'sports']
+          },
         }
-        
-        // Calculate scores
-        for (const [cat, keywords] of Object.entries(categoryPatterns)) {
-          for (const keyword of keywords) {
-            if (combinedText.includes(keyword)) {
-              categoryScores[cat] += 1
+
+        // Calculate scores with weighted matching
+        for (const [cat, patterns] of Object.entries(categoryPatterns)) {
+          let score = 0
+
+          // Check title (3x weight - most important)
+          for (const keyword of patterns.keywords) {
+            if (titleText.includes(keyword)) {
+              score += 3
             }
           }
+
+          // Check negative keywords in title (disqualify if present)
+          for (const negKeyword of patterns.negative) {
+            if (titleText.includes(negKeyword)) {
+              score -= 5  // Heavy penalty for negative matches
+            }
+          }
+
+          // Check domain (1x weight - less reliable)
+          for (const keyword of patterns.keywords) {
+            if (domainText.includes(keyword)) {
+              score += 1
+            }
+          }
+
+          categoryScores[cat] = Math.max(0, score)  // Don't allow negative scores
         }
-        
+
         // Find category with highest score
         let maxScore = 0
         let bestCategory = 'other' // Default to 'other' if no matches
@@ -250,13 +327,24 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
             bestCategory = cat
           }
         }
-        
+
+        // Only assign category if we have meaningful matches (score >= 2)
+        // This allows articles with 1 strong keyword match (3 points from title) to be categorized
+        if (maxScore < 2) {
+          bestCategory = 'other'
+        }
+
+        // Debug: Log first few categorizations
+        if (index < 5) {
+          console.log(`[GDELT] Article "${(item.title || '').slice(0, 50)}..." → category: ${bestCategory} (scores:`, categoryScores, ')')
+        }
+
         realCategory = bestCategory
       }
       return {
         id: `${realCategory}-${index}-${item.url || index}`,
         title: item.title || 'Untitled',
-        description: item.seenqty ? `${item.seenqty} mentions across global media` : null,
+        description: null,
         url: item.url || '#',
         imageUrl: item.socialimage || null,
         publishedAt: publishedAt.toISOString(),
@@ -264,7 +352,7 @@ async function fetchFromGDELT(category: string, lang: string = 'en', sort: strin
         category: realCategory,
         author: null,
         importance,
-        views: item.seenqty ? Math.min(item.seenqty * 10, 2000) : Math.floor(Math.random() * 900) + 100,
+        views: 0,  // Will be populated by enrichment
         tone,
       }
     })
@@ -301,54 +389,78 @@ export async function GET(request: NextRequest) {
       return true
     })
 
-    const resultArticles = uniqueArticles.slice(0, 100)
+    const resultArticles = uniqueArticles.slice(0, 75)  // Reduce for faster processing
 
-    console.log(`[API] Starting enrichment for ${resultArticles.length} articles...`)
-    
-    // Log article date range for debugging
-    const dates = resultArticles.map(a => a.seendate).filter(Boolean).sort()
-    if (dates.length > 0) {
-      console.log(`[API] Article date range: ${dates[0]} to ${dates[dates.length - 1]}`)
-      const now = new Date()
-      const oldestDate = new Date(dates[0])
-      const daysOld = Math.floor((now.getTime() - oldestDate.getTime()) / (1000 * 60 * 60 * 24))
-      console.log(`[API] Oldest article is ${daysOld} days old`)
-    }
+    // Debug: Log category distribution
+    const categoryCounts = resultArticles.reduce((acc, article) => {
+      acc[article.category] = (acc[article.category] || 0) + 1
+      return acc
+    }, {} as Record<string, number>)
+    console.log(`[API] Category distribution:`, categoryCounts)
 
-    // Enrich from local daily GKG DB (fast, optional)
-    const gkgEnriched = await enrichArticlesFromLocalGKG(resultArticles)
+    // Enrich with GKG and Events metadata in parallel (major speedup!)
+    // Since they're independent operations, run them concurrently
+    console.log(`[API] Starting parallel enrichment for ${resultArticles.length} articles...`)
+
+    const [gkgEnriched, eventEnriched] = await Promise.all([
+      enrichArticlesWithGKGOptimized(resultArticles),
+      enrichArticlesWithEventsOptimized(resultArticles)
+    ])
+
     const gkgCount = gkgEnriched.filter(a => a._gkg_enriched).length
-    console.log(`[API] GKG enrichment complete: ${gkgCount}/${resultArticles.length} articles enriched`)
-    
-    // Enrich with event-level metadata (globaleventid, goldsteinscale, avg_tone)
-    const eventEnriched = await enrichArticlesWithEvents(gkgEnriched)
     const eventCount = eventEnriched.filter(a => a._event_enriched).length
-    console.log(`[API] Event enrichment complete: ${eventCount}/${resultArticles.length} articles enriched`)
-    
+    console.log(`[API] Parallel enrichment complete: GKG=${gkgCount}, Events=${eventCount}`)
+
+    // Merge both enrichment sources into single articles
+    const withEnrichment = resultArticles.map(article => {
+      const gkgData = gkgEnriched.find(a => a.url === article.url)?._gkg_enriched ? gkgEnriched.find(a => a.url === article.url).gkg : null
+      const eventData = eventEnriched.find(a => a.url === article.url)?._event_enriched ? eventEnriched.find(a => a.url === article.url).events : null
+
+      return {
+        ...article,
+        ...(gkgData && { _gkg_enriched: true, gkg: gkgData }),
+        ...(eventData && { _event_enriched: true, events: eventData })
+      }
+    })
+
+    // Recategorize articles using GDELT themes (more accurate than keyword matching)
+    const recategorizedArticles = recategorizeArticles(withEnrichment)
+
+    // Log recategorized distribution
+    const recategorizedCounts = recategorizedArticles.reduce((acc, article) => {
+      acc[article.category] = (acc[article.category] || 0) + 1
+      return acc
+    }, {} as Record<string, number>)
+    console.log(`[API] Category distribution after recategorization:`, recategorizedCounts)
+
     // Calculate impact scores (full or provisional) and REPLACE old importance field
-    const withScores = eventEnriched.map(article => {
+    const withScores = recategorizedArticles.map(article => {
       const { score, provisional } = calculateProvisionalScore(article)
+
+      // Use num_articles from events for views, otherwise estimate
+      const estimatedViews = article.events?.num_articles
+        ? Math.min(article.events.num_articles * 15, 5000)
+        : Math.floor(Math.random() * 900) + 100
+
       return {
         ...article,
         importance: score,  // Replace old importance with calculated impact score
         impact_score: score,  // Also keep as impact_score for backward compatibility
         score_provisional: provisional,
+        views: estimatedViews,
       }
     })
-    
-    // Debug: log a sample enriched article to see what data we have
-    const sampleEnriched = withScores.find(a => a._gkg_enriched)
-    if (sampleEnriched) {
-      console.log('[API] Sample GKG enriched article:', {
-        url: sampleEnriched.url?.slice(0, 60),
-        gkg: sampleEnriched.gkg,
-        score: sampleEnriched.impact_score
-      })
-    }
-    
+
     const provisionalCount = withScores.filter(a => a.score_provisional).length
     const fullScoreCount = withScores.length - provisionalCount
     console.log(`[API] Impact scores: ${fullScoreCount} full, ${provisionalCount} provisional`)
+
+    // Log score distribution
+    const scores = withScores.map(a => a.impact_score)
+    const minScore = Math.min(...scores)
+    const maxScore = Math.max(...scores)
+    const avgScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+    console.log(`[API] Score distribution: min=${minScore}, max=${maxScore}, avg=${avgScore}`)
 
     console.log(`[API] Returning ${withScores.length} articles`)
 
